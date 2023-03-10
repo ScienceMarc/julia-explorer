@@ -11,7 +11,7 @@ import (
 	rl "github.com/gen2brain/raylib-go/raylib"
 )
 
-const (
+var (
 	width  = 1440
 	height = 720
 )
@@ -30,10 +30,11 @@ func main() {
 		defer pprof.StopCPUProfile()
 	*/
 
+	rl.SetConfigFlags(rl.FlagWindowResizable)
 	rl.InitWindow(int32(width), int32(height), "Julia Explorer")
 	rl.SetTargetFPS(60)
 
-	screenBuffer := rl.LoadTextureFromImage(rl.GenImageColor(rl.GetScreenWidth(), rl.GetScreenHeight(), rl.Yellow))
+	screenBuffer := rl.LoadTextureFromImage(rl.GenImageColor(width, height, rl.Yellow))
 	renderer := NewRenderer(width, height)
 
 	batches := []int{1, 2, 3, 4, 5, 6, 8, 9, 10, 12, 15, 16, 18, 20, 24, 30, 32, 36, 40, 45, 48, 60, 72, 80, 90, 96, 120, 144, 160, 180, 240, 288, 360, 480, 720, 1440}
@@ -53,11 +54,27 @@ func main() {
 
 	rendering := false
 	needToAA := false
+	AAbeginTime := time.Now()
 
 	for !rl.WindowShouldClose() {
+		if rl.IsWindowResized() {
+			width = rl.GetScreenWidth()
+			height = rl.GetScreenHeight()
+			screenBuffer = rl.LoadTextureFromImage(rl.GenImageColor(width, height, rl.Yellow))
+			renderer = NewRenderer(width, height)
+			batches = []int{}
+			batchIdx = 0
+			for i := 1; i <= width; i++ {
+				if width%i == 0 {
+					batches = append(batches, i)
+				}
+			}
+			update = true
+		}
+
 		mouseX := float64(rl.GetMouseX())
 		mouseY := float64(rl.GetMouseY())
-		mouse := complex(mapRange(mouseX, 0, width, -4, 4), mapRange(mouseY, 0, height, 2, -2))
+		mouse := complex(mapRange(mouseX, 0, float64(width), -4, 4), mapRange(mouseY, 0, float64(height), 4*float64(height)/float64(width), -2*float64(height)/float64(width)))
 
 		if mouse != oldMouse && !mandelbrotMode {
 			update = true
@@ -138,33 +155,35 @@ func main() {
 		} else if needToAA && !rendering && updateFrame+60 <= frameCount {
 			rendering = true
 			needToAA = false
+			AAbeginTime = time.Now()
 			go func() {
 				render(&renderer, mouse, batches[batchIdx], maxIters, samples, zoom, offset, mandelbrotMode)
 				rendering = false
 			}()
 		}
-		renderer.FillRect(width-180, 40, 180, 100, rl.DarkGray)
-		renderer.PlotRect(width-180, 40, 180, 100, rl.White)
-		for i, ft := range frameTimes {
-			x := int(mapRange(float64(i), 0, float64(len(frameTimes)), width-180, width))
-			y := int(math.Max(40, mapRange(1000.0/ft, 0, 60, 40+100, 40)))
-			renderer.Plot(x, y, getColor(int(1000.0/ft), 60))
-		}
+		/*
+			renderer.FillRect(width-180, 40, 180, 100, rl.DarkGray)
+			renderer.PlotRect(width-180, 40, 180, 100, rl.White)
+			for i, ft := range frameTimes {
+				x := int(mapRange(float64(i), 0, float64(len(frameTimes)), float64(width)-180, float64(width)))
+				y := int(math.Max(40, mapRange(1000.0/ft, 0, 60, 40+100, 40)))
+				renderer.Plot(x, y, getColor(int(1000.0/ft), 60))
+			}*/
 
 		rl.UpdateTexture(screenBuffer, renderer.pixels)
 		rl.DrawTexture(screenBuffer, 0, 0, rl.White)
 
 		fps := fmt.Sprintf("%.0ffps", 1.0/rl.GetFrameTime())
-		rl.DrawText(fps, int32(rl.GetScreenWidth()-int(rl.MeasureText(fps, 20))), 0, 20, rl.White)
+		rl.DrawText(fps, int32(rl.GetScreenWidth()-int(rl.MeasureText(fps, 20))), 0, 20, rl.LightGray)
 
 		ft := fmt.Sprint(time.Duration(time.Millisecond * time.Duration(frameTimes[len(frameTimes)-1])))
-		rl.DrawText(ft, int32(rl.GetScreenWidth()-int(rl.MeasureText(ft, 20))), 20, 20, rl.White)
+		rl.DrawText(ft, int32(rl.GetScreenWidth()-int(rl.MeasureText(ft, 20))), 20, 20, rl.LightGray)
 
 		rText := ""
 		if rendering {
-			rText = "!RENDERING!"
+			rText = fmt.Sprintf("!RENDERING! (%v)", time.Since(AAbeginTime).Round(time.Millisecond))
 		}
-		rl.DrawText(fmt.Sprintf("C=%v \ncenter: %v, zoom: %fx\n%d iterations (%.0fxSSAA) [%d threads] %s", mouse, offset, zoom, maxIters, samples, width/batches[batchIdx], rText), 0, height-80, 20, rl.LightGray)
+		rl.DrawText(fmt.Sprintf("C=%v \ncenter: %v, zoom: %fx\n%d iterations (%.0fxSSAA) [%d threads] %s", mouse, offset, zoom, maxIters, samples, width/batches[batchIdx], rText), 0, int32(height)-80, 20, rl.LightGray)
 
 		rl.EndDrawing()
 		update = false
@@ -172,6 +191,7 @@ func main() {
 	}
 }
 
+// TODO: Potentially re-evaluate/re-order parameters
 func render(r *Renderer, mouse complex128, batchSize, maxIters int, samples, zoom float64, offset complex128, mandelbrotMode bool) {
 	var wg sync.WaitGroup
 
@@ -179,7 +199,7 @@ func render(r *Renderer, mouse complex128, batchSize, maxIters int, samples, zoo
 	//fmt.Println(mouse, struct{ X, Y float64 }{float64(rl.GetMouseX()), float64(rl.GetMouseY())})
 	sqrt := math.Sqrt(samples)
 
-	var scale = 2.0 / zoom
+	var scale = 4.0 / zoom
 	for x := 0; x < width; x += batchSize {
 		go func(x int) {
 			defer wg.Done()
@@ -192,7 +212,7 @@ func render(r *Renderer, mouse complex128, batchSize, maxIters int, samples, zoo
 						ys := float64(int(s) / int(sqrt))
 						z := complex(float64(x)+xs/sqrt, float64(y)+ys/sqrt)
 						//z = mapComplex(z, complex(0, 0), screenRange, 3-3i, -3+3i)
-						z = complex(mapRange(real(z), 0, width, -scale*2, scale*2), mapRange(imag(z), 0, height, scale, -scale))
+						z = complex(mapRange(real(z), 0, float64(width), -scale, scale), mapRange(imag(z), 0, float64(height), scale*float64(height)/float64(width), -scale*float64(height)/float64(width)))
 						z += offset
 
 						//mouse = -0.4 + 0.6i
