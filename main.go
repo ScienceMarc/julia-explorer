@@ -38,9 +38,10 @@ func main() {
 	renderer := NewRenderer(width, height)
 	var wg sync.WaitGroup
 	jobs := make(chan Job, width)
+	work := make([]int, runtime.NumCPU())
 
 	for i := 0; i < runtime.NumCPU(); i++ {
-		go worker(&wg, &renderer, jobs)
+		go worker(&wg, &renderer, jobs, i, work)
 	}
 
 	batches := []int{1, 2, 3, 4, 5, 6, 8, 9, 10, 12, 15, 16, 18, 20, 24, 30, 32, 36, 40, 45, 48, 60, 72, 80, 90, 96, 120, 144, 160, 180, 240, 288, 360, 480, 720, 1440}
@@ -114,13 +115,11 @@ func main() {
 			update = true
 		case 'O':
 			batchIdx = (batchIdx + 1) % len(batches)
-			fmt.Println(batchIdx, batches[batchIdx])
 		case 'P':
 			batchIdx--
 			if batchIdx < 0 {
 				batchIdx = len(batches) - 1
 			}
-			fmt.Println(batchIdx, batches[batchIdx])
 		case 0:
 
 		default:
@@ -156,6 +155,9 @@ func main() {
 
 		rl.BeginDrawing()
 		if update {
+			for i := 0; i < len(work); i++ {
+				work[i] = 0
+			}
 			//Dump jobs
 		L:
 			for {
@@ -170,6 +172,9 @@ func main() {
 			updateFrame = frameCount
 			needToAA = true
 		} else if needToAA && !rendering && updateFrame+60 <= frameCount {
+			for i := 0; i < len(work); i++ {
+				work[i] = 0
+			}
 			rendering = true
 			needToAA = false
 			AAbeginTime = time.Now()
@@ -191,17 +196,24 @@ func main() {
 		rl.DrawTexture(screenBuffer, 0, 0, rl.White)
 
 		fps := fmt.Sprintf("%.0ffps", 1.0/rl.GetFrameTime())
-		rl.DrawText(fps, int32(rl.GetScreenWidth()-int(rl.MeasureText(fps, 20))), 0, 20, rl.LightGray)
+		rl.DrawText(fps, int32(rl.GetScreenWidth()-int(rl.MeasureText(fps, 20))), 0, 20, rl.Green)
 
 		ft := fmt.Sprint(time.Duration(time.Millisecond * time.Duration(frameTimes[len(frameTimes)-1])))
-		rl.DrawText(ft, int32(rl.GetScreenWidth()-int(rl.MeasureText(ft, 20))), 20, 20, rl.LightGray)
+		rl.DrawText(ft, int32(rl.GetScreenWidth()-int(rl.MeasureText(ft, 20))), 20, 20, rl.Green)
 
 		rText := fmt.Sprintf("(%v)", timeTaken)
 		if rendering {
 			timeTaken = time.Since(AAbeginTime).Round(time.Millisecond)
 			rText = "!RENDERING! " + rText
 		}
-		rl.DrawText(fmt.Sprintf("C=%v \ncenter: %v, zoom: %fx\n%d iterations (%.0fxSSAA) [%d jobs] %s", mouse, offset, zoom, maxIters, samples, width/batches[batchIdx], rText), 0, int32(height)-80, 20, rl.LightGray)
+		rl.DrawText(fmt.Sprintf("C=%v \ncenter: %v, zoom: %fx\n%d iterations (%.0fxSSAA) [%d jobs] %s", mouse, offset, zoom, maxIters, samples, width/batches[batchIdx], rText), 0, int32(height)-80, 20, rl.Green)
+
+		sum := 0
+		for _, v := range work {
+			sum += v
+		}
+
+		rl.DrawText(fmt.Sprintf("%v = %d%%", work, (100*sum)/(width/batches[batchIdx])), 0, 0, 20, rl.Green)
 
 		rl.EndDrawing()
 		update = false
@@ -209,7 +221,7 @@ func main() {
 	}
 }
 
-func worker(wg *sync.WaitGroup, r *Renderer, jobs <-chan Job) {
+func worker(wg *sync.WaitGroup, r *Renderer, jobs <-chan Job, id int, work []int) {
 	for {
 		job := <-jobs
 		for i := 0; i < job.BatchSize; i++ {
@@ -237,6 +249,7 @@ func worker(wg *sync.WaitGroup, r *Renderer, jobs <-chan Job) {
 				r.Plot(x, y, getColor(int(iterAvg), job.MaxIters))
 			}
 		}
+		work[id]++
 		wg.Done()
 	}
 }
