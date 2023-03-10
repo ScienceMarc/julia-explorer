@@ -36,6 +36,12 @@ func main() {
 
 	screenBuffer := rl.LoadTextureFromImage(rl.GenImageColor(width, height, rl.Yellow))
 	renderer := NewRenderer(width, height)
+	var wg sync.WaitGroup
+	jobs := make(chan Job, width)
+
+	for i := 0; i < runtime.NumCPU(); i++ {
+		go worker(&wg, &renderer, jobs)
+	}
 
 	batches := []int{1, 2, 3, 4, 5, 6, 8, 9, 10, 12, 15, 16, 18, 20, 24, 30, 32, 36, 40, 45, 48, 60, 72, 80, 90, 96, 120, 144, 160, 180, 240, 288, 360, 480, 720, 1440}
 	batchIdx := 0
@@ -55,6 +61,7 @@ func main() {
 	rendering := false
 	needToAA := false
 	AAbeginTime := time.Now()
+	timeTaken := time.Since(AAbeginTime)
 
 	for !rl.WindowShouldClose() {
 		if rl.IsWindowResized() {
@@ -149,7 +156,17 @@ func main() {
 
 		rl.BeginDrawing()
 		if update {
-			render(&renderer, mouse, batches[batchIdx], maxIters, 1.0, zoom, offset, mandelbrotMode)
+			//Dump jobs
+		L:
+			for {
+				select {
+				case <-jobs:
+					wg.Done()
+				default:
+					break L
+				}
+			}
+			render(&renderer, mouse, batches[batchIdx], maxIters, 1.0, zoom, offset, mandelbrotMode, &wg, jobs)
 			updateFrame = frameCount
 			needToAA = true
 		} else if needToAA && !rendering && updateFrame+60 <= frameCount {
@@ -157,7 +174,7 @@ func main() {
 			needToAA = false
 			AAbeginTime = time.Now()
 			go func() {
-				render(&renderer, mouse, batches[batchIdx], maxIters, samples, zoom, offset, mandelbrotMode)
+				render(&renderer, mouse, batches[batchIdx], maxIters, samples, zoom, offset, mandelbrotMode, &wg, jobs)
 				rendering = false
 			}()
 		}
@@ -179,11 +196,12 @@ func main() {
 		ft := fmt.Sprint(time.Duration(time.Millisecond * time.Duration(frameTimes[len(frameTimes)-1])))
 		rl.DrawText(ft, int32(rl.GetScreenWidth()-int(rl.MeasureText(ft, 20))), 20, 20, rl.LightGray)
 
-		rText := ""
+		rText := fmt.Sprintf("(%v)", timeTaken)
 		if rendering {
-			rText = fmt.Sprintf("!RENDERING! (%v)", time.Since(AAbeginTime).Round(time.Millisecond))
+			timeTaken = time.Since(AAbeginTime).Round(time.Millisecond)
+			rText = "!RENDERING! " + rText
 		}
-		rl.DrawText(fmt.Sprintf("C=%v \ncenter: %v, zoom: %fx\n%d iterations (%.0fxSSAA) [%d threads] %s", mouse, offset, zoom, maxIters, samples, width/batches[batchIdx], rText), 0, int32(height)-80, 20, rl.LightGray)
+		rl.DrawText(fmt.Sprintf("C=%v \ncenter: %v, zoom: %fx\n%d iterations (%.0fxSSAA) [%d jobs] %s", mouse, offset, zoom, maxIters, samples, width/batches[batchIdx], rText), 0, int32(height)-80, 20, rl.LightGray)
 
 		rl.EndDrawing()
 		update = false
@@ -191,45 +209,71 @@ func main() {
 	}
 }
 
-// TODO: Potentially re-evaluate/re-order parameters
-func render(r *Renderer, mouse complex128, batchSize, maxIters int, samples, zoom float64, offset complex128, mandelbrotMode bool) {
-	var wg sync.WaitGroup
+func worker(wg *sync.WaitGroup, r *Renderer, jobs <-chan Job) {
+	for {
+		job := <-jobs
+		for i := 0; i < job.BatchSize; i++ {
+			x := job.X + i
+			for y := 0; y < height; y++ {
+				iterAvg := 0.0
+				for s := 0.0; s < job.Samples; s++ {
+					xs := float64(int(s) % int(job.Sqrt))
+					ys := float64(int(s) / int(job.Sqrt))
+					z := complex(float64(x)+xs/job.Sqrt, float64(y)+ys/job.Sqrt)
+					//z = mapComplex(z, complex(0, 0), screenRange, 3-3i, -3+3i)
+					z = complex(mapRange(real(z), 0, float64(width), -job.Scale, job.Scale), mapRange(imag(z), 0, float64(height), job.Scale*float64(height)/float64(width), -job.Scale*float64(height)/float64(width)))
+					z += job.Offset
 
+					//mouse = -0.4 + 0.6i
+					iters := 0
+					if !job.MandelbrotMode {
+						_, iters = inJulia(z, job.Mouse, job.MaxIters)
+					} else {
+						_, iters = inJulia(0+0i, z, job.MaxIters)
+					}
+					iterAvg += float64(iters)
+				}
+				iterAvg /= float64(job.Samples)
+				r.Plot(x, y, getColor(int(iterAvg), job.MaxIters))
+			}
+		}
+		wg.Done()
+	}
+}
+
+type Job struct {
+	Mouse          complex128
+	Offset         complex128
+	BatchSize      int
+	MaxIters       int
+	Samples        float64
+	MandelbrotMode bool
+
+	X     int
+	Sqrt  float64
+	Scale float64
+}
+
+// TODO: Potentially re-evaluate/re-order parameters
+func render(r *Renderer, mouse complex128, batchSize, maxIters int, samples, zoom float64, offset complex128, mandelbrotMode bool, wg *sync.WaitGroup, jobs chan<- Job) {
 	wg.Add(width / batchSize)
 	//fmt.Println(mouse, struct{ X, Y float64 }{float64(rl.GetMouseX()), float64(rl.GetMouseY())})
 	sqrt := math.Sqrt(samples)
 
 	var scale = 4.0 / zoom
 	for x := 0; x < width; x += batchSize {
-		go func(x int) {
-			defer wg.Done()
-			for i := 0; i < batchSize; i++ {
-				x := x + i
-				for y := 0; y < height; y++ {
-					iterAvg := 0.0
-					for s := 0.0; s < samples; s++ {
-						xs := float64(int(s) % int(sqrt))
-						ys := float64(int(s) / int(sqrt))
-						z := complex(float64(x)+xs/sqrt, float64(y)+ys/sqrt)
-						//z = mapComplex(z, complex(0, 0), screenRange, 3-3i, -3+3i)
-						z = complex(mapRange(real(z), 0, float64(width), -scale, scale), mapRange(imag(z), 0, float64(height), scale*float64(height)/float64(width), -scale*float64(height)/float64(width)))
-						z += offset
+		jobs <- Job{
+			Mouse:          mouse,
+			Offset:         offset,
+			BatchSize:      batchSize,
+			MaxIters:       maxIters,
+			Samples:        samples,
+			MandelbrotMode: mandelbrotMode,
 
-						//mouse = -0.4 + 0.6i
-						iters := 0
-						if !mandelbrotMode {
-							_, iters = inJulia(z, mouse, maxIters)
-						} else {
-							_, iters = inJulia(0+0i, z, maxIters)
-						}
-						iterAvg += float64(iters)
-					}
-					iterAvg /= float64(samples)
-					r.Plot(x, y, getColor(int(iterAvg), maxIters))
-				}
-			}
-		}(x)
-
+			X:     x,
+			Sqrt:  sqrt,
+			Scale: scale,
+		}
 	}
 	wg.Wait()
 }
